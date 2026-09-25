@@ -98,6 +98,47 @@ SQL
         }
     }
 
+    public function testCompositeIndexWithSortDirection()
+    {
+        try {
+            /** @var PostgreSQLSchemaManager $dbSchema */
+            $dbSchema = DB::get_schema();
+            $dbSchema->quiet();
+
+            // Regression test for a composite index whose columns include a sort
+            // direction, e.g. SilverStripe\Assets\File's "default_asset_sort" index.
+            // getIndexSqlDefinition() previously quoted "IsFolder DESC" as a single
+            // (invalid) column identifier instead of splitting it into "IsFolder" DESC.
+            $dbSchema->schemaUpdate(function () use ($dbSchema) {
+                $dbSchema->requireTable(
+                    'IndexDirectionTest',
+                    [
+                        'ParentID' => 'Int',
+                        'IsFolder' => 'Boolean',
+                        'Title' => 'Varchar(255)',
+                    ],
+                    [
+                        'default_sort' => [
+                            'type' => 'index',
+                            'columns' => ['ParentID', 'IsFolder DESC', 'Title'],
+                        ],
+                    ]
+                );
+            });
+
+            $definitions = DB::prepared_query(
+                'SELECT indexdef FROM pg_indexes WHERE tablename = ?',
+                ['IndexDirectionTest']
+            )->column('indexdef');
+
+            $this->assertNotEmpty($definitions, 'Composite index with a sort direction should have been created');
+            $matching = array_filter($definitions, fn($def) => str_contains($def, '"IsFolder" DESC'));
+            $this->assertNotEmpty($matching, 'Expected an index definition containing "IsFolder" DESC, got: ' . implode(' | ', $definitions));
+        } finally {
+            DB::query('DROP TABLE IF EXISTS "IndexDirectionTest" CASCADE');
+        }
+    }
+
     private function assertConstraintCount($expected, $constraintName)
     {
         $count = DB::prepared_query(
