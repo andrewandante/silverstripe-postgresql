@@ -581,7 +581,16 @@ class PostgreSQLSchemaManager extends DBSchemaManager
 
     public function checkAndRepairTable($tableName)
     {
-        $this->query("VACUUM FULL ANALYZE \"$tableName\"");
+        // Postgres refuses to VACUUM inside a transaction block, and once a query fails the
+        // whole transaction is aborted (no further commands, not even a fallback ANALYZE, can
+        // run until rollback) - so this has to be checked before running the query, not caught
+        // after. This routinely happens when requireTable() triggers a repair mid-test, since
+        // SapphireTest wraps each test in a transaction.
+        if ($this->database->transactionDepth() > 0) {
+            $this->query("ANALYZE \"$tableName\"");
+        } else {
+            $this->query("VACUUM FULL ANALYZE \"$tableName\"");
+        }
         $this->query("REINDEX TABLE \"$tableName\"");
         return true;
     }
