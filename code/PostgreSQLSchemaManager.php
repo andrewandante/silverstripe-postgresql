@@ -670,10 +670,12 @@ class PostgreSQLSchemaManager extends DBSchemaManager
 
                             if (sizeof($constraints) > 0) {
                                 //Get the default:
+                                // column_default may be null if the column has a check constraint but no DEFAULT clause
+                                $columnDefault = $field['column_default'] ?? '';
                                 $default = trim(substr(
-                                    $field['column_default'],
+                                    $columnDefault,
                                     0,
-                                    strpos($field['column_default'], '::')
+                                    strpos($columnDefault, '::')
                                 ), "'");
                                 $output[$field['column_name']] = $this->enum(array(
                                     'default' => $default,
