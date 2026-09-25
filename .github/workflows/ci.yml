@@ -14,16 +14,20 @@ jobs:
       phpunit: false
       preserve_vendor_tests: true
       extra_jobs: |
-        - php: 8.1
+        - php: 8.3
           db: pgsql
           phpunit: true
           composer_args: --prefer-lowest
           phpunit_suite: all
-        - php: 8.1
+        - php: 8.3
           db: pgsql
           phpunit: true
           phpunit_suite: all
-        - php: 8.2
+        - php: 8.4
+          db: pgsql
+          phpunit: true
+          phpunit_suite: all
+        - php: 8.5
           db: pgsql
           phpunit: true
           phpunit_suite: all
