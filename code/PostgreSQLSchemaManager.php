@@ -224,6 +224,7 @@ class PostgreSQLSchemaManager extends DBSchemaManager
         if ($indexes) {
             foreach ($indexes as $k => $v) {
                 $indexQueries[] = $this->getIndexSqlDefinition($table, $k, $v);
+                $indexQueries[] = $this->getIndexCommentSql($table, $k);
             }
         }
 
@@ -374,6 +375,7 @@ class PostgreSQLSchemaManager extends DBSchemaManager
                 $createIndex = $this->getIndexSqlDefinition($table, $indexName, $indexSpec);
                 if ($createIndex) {
                     $alterIndexList[] = $createIndex;
+                    $alterIndexList[] = $this->getIndexCommentSql($table, $indexName);
                 }
             }
         }
@@ -402,6 +404,7 @@ class PostgreSQLSchemaManager extends DBSchemaManager
                 $createIndex = $this->getIndexSqlDefinition($table, $indexName, $indexSpec);
                 if ($createIndex) {
                     $alterIndexList[] = $createIndex;
+                    $alterIndexList[] = $this->getIndexCommentSql($table, $indexName);
                 }
             }
         }
@@ -757,7 +760,22 @@ class PostgreSQLSchemaManager extends DBSchemaManager
         $createIndex = $this->getIndexSqlDefinition($tableName, $indexName, $indexSpec);
         if ($createIndex !== false) {
             $this->query($createIndex);
+            $this->query($this->getIndexCommentSql($tableName, $indexName));
         }
+    }
+
+    /**
+     * Postgres index names are md5-hashed to fit within the 63 character identifier limit
+     * (see buildPostgresIndexName()), so the original SilverStripe index name can't be
+     * recovered from the physical name alone. Store it as a comment on the index so
+     * indexList() can key its results by the original name, the same way the MySQL and
+     * SQLite schema managers do.
+     */
+    protected function getIndexCommentSql($tableName, $indexName)
+    {
+        $indexNamePG = $this->buildPostgresIndexName($tableName, $indexName);
+        $escapedIndexName = str_replace("'", "''", $indexName);
+        return "COMMENT ON INDEX \"$indexNamePG\" IS '$escapedIndexName';";
     }
 
     protected function getIndexSqlDefinition($tableName, $indexName, $indexSpec)
@@ -811,6 +829,32 @@ class PostgreSQLSchemaManager extends DBSchemaManager
                 $spec = "create index \"$tableCol\" ON \"$tableName\" (" . $this->implodeIndexColumnList($indexSpec['columns'], $indexSpec['type']) . ") $fillfactor $where";
         }
         return trim($spec) . ';';
+    }
+
+    /**
+     * Parse a column list (with per-column sort direction) out of a Postgres "indexdef"
+     * string, e.g. 'CREATE INDEX ... ON "Table" USING btree ("Title" DESC, "Name")'
+     * becomes ['Title DESC', 'Name ASC']. Unlike implodeColumnList()/explodeColumnString(),
+     * this understands that Postgres omits the default ASC direction when echoing indexdef
+     * back, but a direction is always returned (defaulting to ASC) to match the format
+     * MySQLSchemaManager::indexList() returns (its "Collation" column is always A or D).
+     */
+    protected function explodeIndexColumnString($indexDef)
+    {
+        // Isolate the column list between the outermost parentheses
+        $containedSpec = preg_replace('/(.*\(\s*)|(\s*\).*)/', '', $indexDef ?? '');
+
+        $columns = [];
+        foreach (preg_split('/\s*,\s*/', trim($containedSpec ?? '')) as $column) {
+            $column = trim($column);
+            if (preg_match('/^"([^"]+)"(\s+(asc|desc))?$/i', $column, $matches)) {
+                $direction = !empty($matches[3]) ? strtoupper($matches[3]) : 'ASC';
+                $columns[] = "{$matches[1]} $direction";
+            } else {
+                $columns[] = trim($column, '" ') . ' ASC';
+            }
+        }
+        return $columns;
     }
 
     public function alterIndex($tableName, $indexName, $indexSpec)
@@ -882,9 +926,12 @@ class PostgreSQLSchemaManager extends DBSchemaManager
     public function indexList($table)
     {
         //Retrieve a list of indexes for the specified table
+        //index_comment recovers the original SilverStripe index name saved by getIndexCommentSql(),
+        //since indexname itself is an md5 hash (see buildPostgresIndexName())
         $indexes = $this->preparedQuery(
             "
-            SELECT tablename, indexname, indexdef
+            SELECT indexname, indexdef,
+                obj_description((quote_ident(schemaname) || '.' || quote_ident(indexname))::regclass, 'pg_class') AS index_comment
             FROM pg_catalog.pg_indexes
             WHERE tablename = ? AND schemaname = ?;",
             array($table, $this->database->currentSchema())
@@ -892,9 +939,10 @@ class PostgreSQLSchemaManager extends DBSchemaManager
 
         $indexList = array();
         foreach ($indexes as $index) {
-            // Key for the indexList array.  Differs from other DB implementations, which is why
-            // requireIndex() needed to be overridden
-            $indexName = $index['indexname'];
+            // Key for the indexList array. Recovered from the comment saved on the index at creation
+            // time where available (see getIndexCommentSql()), falling back to the physical (hashed)
+            // postgres index name for indexes created before this was introduced.
+            $indexName = $index['index_comment'] ?: $index['indexname'];
 
             //We don't actually need the entire created command, just a few bits:
             $type = '';
@@ -923,14 +971,17 @@ class PostgreSQLSchemaManager extends DBSchemaManager
                 // Extract trigger information from postgres
                 $triggerName = preg_replace('/^ix_/', 'ts_', $index['indexname']);
                 $columns = $this->extractTriggerColumns($triggerName, $table);
-                $columnString = $this->implodeColumnList($columns);
             } else {
-                $columnString = $this->quoteColumnSpecString($index['indexdef']);
+                // Postgres omits the default ASC direction (and normalises unquoted
+                // lowercase identifiers) when echoing indexdef back, so parse the column
+                // list directly rather than round-tripping through implodeColumnList(),
+                // which isn't direction-aware.
+                $columns = $this->explodeIndexColumnString($index['indexdef']);
             }
 
             $indexList[$indexName] = array(
-                'name' => $indexName, // Not the correct name in the PHP, as this will be a mangled postgres-unique code
-                'columns' => $this->explodeColumnString($columnString),
+                'name' => $indexName,
+                'columns' => $columns,
                 'type' => $type ?: 'index',
             );
         }
